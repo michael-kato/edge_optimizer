@@ -1,34 +1,38 @@
 
 
-# TODO: convert to PyMel
-import maya.api.OpenMaya as om2 
+import maya.api.OpenMaya as om2
 import pymel.core as pm
 
 
-class EdgeOptimizer(object):
-    mayaVersion = pm.about(version = True)
-
-	
-    def removeFromArray(dagPath, components, deleteMe):
+class MeshOptimizer(object):
+    def __init__(self):
+        self.dagPath = None
+        self.deletableEdges = []
+        self.smoothableHardEdges = []
+        self.mergeVerts = False
+        self.angleTolerance = 0.001
+        self.mergeDistance = 0.01
+    
+    def removeFromArray(self, components, deleteMe):
         """
-        Helper function that performs a simple but repetative task of removing things from MIntArrays
+        Helper that performs a simple but repetative task of removing things from MIntArrays
         """
         for i, k in enumerate(components):
             if k == deleteMe:
                 components.remove(i)
         return components
-        
-		
+
+
     def indexToString(self, dagPath, items, componentType):
         """
-        Helper function to convert API component indicies to strings that Python and MEL understand
+        Helper to convert API component indicies to strings that Python and MEL understand
         """
         strings = []
         for item in items:
             strings.append("%s.%s[%d]" % (dagPath, componentType, item))
         return strings
         
-		
+
     def getVertPositions(self, dagPath):
         mesh = om2.MFnMesh(dagPath)
         
@@ -42,65 +46,7 @@ class EdgeOptimizer(object):
             
         return vertIndicies, vertPositions
 
-        
-    def getBooleanVertices(self, dagPath, mode):
-        # Get input nodes on object to find new edges created by booleans
-        obj = pm.ls(dagPath)[0]
-        
-        if mode == "Entire Mesh":
-            print("Iterating over whole mesh")
-            boolVerts = range(0, obj.numVertices()-1)
 
-        elif mode == "Boolean History":
-            boolNodes = []
-            
-            # Iterate trough input nodes and find all booleans
-            for node in obj.listHistory():
-                if node.nodeType() == "polyCBoolOp":
-                    node = node.listHistory()[-1]
-                    # Move the cut mesh up 1000 units to be safe
-                    # This temporarily removes the boolean effects
-                    # Pretty hacky, but it works
-                    print(node)
-                    pm.xform(node, t=[0,1000,0])
-                    
-                    boolNodes.append(node)
-                    
-            # Record vert positions
-            preVertIndicies, preVertPositions = self.getVertPositions(dagPath)
-            
-            # move transforms back and record vert positions again
-            for boolNode in boolNodes:
-                pm.xform(boolNode, t=[0,-1000,0])
-                
-            postVertIndicies, postVertPositions = self.getVertPositions(dagPath)
-            
-            # Diff vert lists to find new verts
-            diffedVerts = set(preVertPositions).intersection(set(postVertPositions))
-            
-            boolVerts = []
-            for i, vert in enumerate(diffedVerts):
-                boolVerts.append(postVertIndicies[i])
-
-        elif mode == "By Material":
-            print("Searching by material")
-            material = raw_input("Enter material name")
-			
-            # Select faces by material. Get edges, then get verts
-            pm.hyperShade(objects=material)
-            boolVerts = pm.ls( pm.polyListComponentConversion(fromFace=True, toVertex=True), fl=True )
-			
-            for i, vert in enumerate(boolVerts[:]):
-                boolVerts[i] = vert.index()
-            
-        print("Bool verts:", boolVerts)
-        
-        if boolVerts:
-            return boolVerts
-        else:
-            pm.error( "Script failed to find boolean stuff" )
-        
-		
     def getEdgeVector(self, mesh, edge):
         edgeVerts = mesh.getEdgeVertices(edge)
         edgeVector = (om2.MVector(mesh.getPoint(edgeVerts[0])) - om2.MVector( mesh.getPoint(edgeVerts[1])))
@@ -112,19 +58,18 @@ class EdgeOptimizer(object):
         while not conVertIter.isDone():
             # maya seems to crash if this list is empty!
             if verts: 
-                if conVertIter.index() == verts[verts.__len__() - 1]:
+                if conVertIter.index() == verts[verts.count() - 1]:
                     outlyingEdges = conVertIter.getConnectedEdges()
                     # Deleting this edge could change the mesh in a negative way
                     # we need to check to see if it's safe
-                    if outlyingEdges > 4:
+                    if outlyingEdges.count() > 4:
                         sharedEdges = list(set(outlyingEdges).intersection(connectedEdges))
-                        print(sharedEdges)
                         if sharedEdges:
                             for i, edge in enumerate(sharedEdges):
                                 if edge in connectedEdges:
                                     connectedEdges.remove(i)    
                         conVertIter.reset()
-                    verts.remove( verts.__len__() - 1 )
+                    verts.remove( verts.count() - 1 )
                 conVertIter.next()
 				
             else:
@@ -135,7 +80,6 @@ class EdgeOptimizer(object):
 
 		
     def checkUVBorders(self, edges):
-        print("Checking if edges are part of a UV border")
         safeEdges = []
         for edge in edges:
             numUVs = pm.ls( pm.polyListComponentConversion( edge, fromEdge=True, toUV=True ), fl=True)
@@ -144,7 +88,7 @@ class EdgeOptimizer(object):
         return safeEdges
     
 	
-    def getParallelEdges(self, dagPath, vert, angleTolerance):
+    def getParallelEdges(self, dagPath, vert):
         mesh = om2.MFnMesh(dagPath)
         
         vertIter = om2.MItMeshVertex(dagPath)
@@ -159,7 +103,7 @@ class EdgeOptimizer(object):
                         edge1Vector = self.getEdgeVector(mesh, edge1)
                         edge2Vector = self.getEdgeVector(mesh, edge2)
                         
-                        if edge1Vector.isParallel(edge2Vector, angleTolerance):
+                        if edge1Vector.isParallel(edge2Vector):
                             # If there are parallel edges, remove them from the list
                             connectedEdges = self.removeFromArray(connectedEdges, edge1)
                             connectedEdges = self.removeFromArray(connectedEdges, edge2)
@@ -172,93 +116,122 @@ class EdgeOptimizer(object):
             vertIter.next()
     
 	
-    def mergeBooleanVerts(self, dagPath, boolVertPositions):
+    def mergeNearbyVerts(self, dagPath, boolVertPositions):
         print("Merging verts")
         verts = om2.MFnMesh(dagPath).getPoints()
         
         mergeVerts = set(verts).difference(set(boolVertPositions))
+        print("MERGE", mergeVerts)
              
     
     """
-    TODO: Warn user if mesh is skinned or using vertex colors
+    TODO: Warn user if mesh is skinned or using vertex colors, this is not explicitly supported. 
     """
-    def deleteBooleanEdges(self, mode="Entire Mesh", angleTolerance=0.001, mergeVerts=False, mergeDistance=0.01):
+    def findBadEdges(self):
         selection = om2.MGlobal.getActiveSelectionList()
-        toDelete = []
+        self.deletableEdges = []
 
         selIter = om2.MItSelectionList(selection)
         while not selIter.isDone():
             dagPath = selIter.getDagPath()
             # Get edges and verts to work on
-            boolVerts = self.getBooleanVertices(dagPath, mode)
-            # Iterate  over verts (unless there's an edge method)
-            for vert in boolVerts:
-                edges = self.getParallelEdges(dagPath, vert, angleTolerance)
+            obj = pm.ls(dagPath.fullPathName())[0]
+            verts = range(0, obj.numVertices()-1)
+            for vert in verts:
+                edges = self.getParallelEdges(dagPath, vert)
                 if edges:
                     for edge in edges:
-                        if edge not in toDelete:
-                            toDelete.append(edge)
+                        if edge not in self.deletableEdges:
+                            self.deletableEdges.append(edge)
             
             selIter.next()
-        
-        print("To be deleted", toDelete)
-        if toDelete:
-            pm.polyDelEdge(toDelete, cv=True)       
 
+        pm.select(self.deletableEdges, replace=True)
 
-    def isParallel(self, vectors, tolerance=0.0):
-        """
-        Check if a list of vectors are roughly parallel (or exactly parallel if you want).
-        """
-        for i in range(len(vectors)):
-            for j in range(i + 1, len(vectors)):
-                if not vectors[i].isParallel(vectors[j], tolerance):
-                    return False
-            
-        return True
+    def deleteEdges(self):
+        print("Deleting:", self.deletableEdges)
+        if self.deletableEdges:
+            pm.polyDelEdge(self.deletableEdges, cv=True) # polyDelEdge -cv true -ch 1 knife_cuts.e[848:895] knife_cuts.e[940:983] knife_cuts.e[1032:1079] knife_cuts.e[1118:1159];
+
+        #TODO: implement this properly
+        if self.mergeVerts:
+            pm.warning("Feature not supported yet")
+            #self.mergeNearbyVerts()
     
 
-    def findBrokenTangents(self, tolerance=0.0):
-        """
-        Iterates the edges of the selected mesh and compares the face-vertex normals and tangent directions of the edge vertices.
-        Returns a list of edges which have differing tangent directions.
-        """
-        selection = pm.ls(selection=True, dag=True, type='mesh', ni=True)
-        
-        if not selection:
-            pm.error("No mesh selected.")
+    def findBrokenTangents(self):
+        """Select hard edges with matching normals on both ends."""
+        selection = om2.MGlobal.getActiveSelectionList()
+        dagPaths = {}
+
+        for index in range(selection.length()):
+            try:
+                path = selection.getDagPath(index)
+            except (RuntimeError, TypeError):
+                continue
+
+            paths = []
+
+            if path.node().hasFn(om2.MFn.kMesh):
+                paths.append(path)
+
+            elif path.node().hasFn(om2.MFn.kTransform):
+                dagIter = om2.MItDag()
+                dagIter.reset(path, om2.MItDag.kDepthFirst, om2.MFn.kMesh)
+                while not dagIter.isDone():
+                    paths.append(dagIter.getPath())
+                    dagIter.next()
+
+            for dagPath in paths:
+                if not om2.MFnDagNode(dagPath).isIntermediateObject:
+                    dagPaths[dagPath.fullPathName()] = dagPath
+
+        if not dagPaths:
+            om2.MGlobal.displayError("No mesh selected.")
             return
-        
-        for mesh in selection:
-            badEdges = []
-            
-            # Iterate through edges
-            for edge in mesh.edges:
-                brokenTangentCounter = 0
-                # Skip boundary edges
-                if edge.isOnBoundary() or edge.isSmooth():
-                    continue
 
-                edgeVerts = edge.connectedVertices()
-                for edgeVert in edgeVerts:
-                    testTangents = []
-                    connectedFaces = edgeVert.connectedFaces()
+        self.smoothableHardEdges = []
+        result = om2.MSelectionList()
 
-                    for face in connectedFaces:
-                        t = mesh.getFaceVertexTangent(face.index(), edgeVert.index())
-                        testTangents.append(t)
+        for path in dagPaths.values():
+            mesh = om2.MFnMesh(path)
+            edgeIter = om2.MItMeshEdge(path)
+            edgeIds = []
 
-                    if not self.isParallel(testTangents):
-                        brokenTangentCounter += 1
+            while not edgeIter.isDone():
+                if not edgeIter.onBoundary() and not edgeIter.isSmooth:
+                    faces = edgeIter.getConnectedFaces()
 
-                if brokenTangentCounter == 2:
-                    badEdges.append(edge)
+                    if len(faces) == 2:
+                        normals_match = True
 
-            if badEdges:
-                pm.select(badEdges, replace=True)
-                if pm.checkBoxGrp(self.smoothEdgesAfter, query=True, value1=True):
-                    pm.polySoftEdge(angle=180)
+                        for endpoint in (0, 1):
+                            vertex_id = edgeIter.vertexId(endpoint)
+                            n1 = mesh.getFaceVertexNormal(faces[0], vertex_id)
+                            n2 = mesh.getFaceVertexNormal(faces[1], vertex_id)
 
+                            if (n1.length() < 1e-12 or n2.length() < 1e-12 or n1.angle(n2) > self.angleTolerance):
+                                normals_match = False
+                                break
+
+                        if normals_match:
+                            edgeIds.append(edgeIter.index())
+
+                edgeIter.next()
+
+            if edgeIds:
+                component_fn = om2.MFnSingleIndexedComponent()
+                component = component_fn.create(om2.MFn.kMeshEdgeComponent)
+                component_fn.addElements(edgeIds)
+                result.add((path, component))
+
+                self.smoothableHardEdges.extend("{}.e[{}]".format(path.fullPathName(), edgeId) for edgeId in edgeIds)
+
+        om2.MGlobal.setActiveSelectionList(result, om2.MGlobal.kReplaceList)
+        om2.MGlobal.displayInfo("Found {} hard edges with matching normals.".format(len(self.smoothableHardEdges)))
+
+    def smoothHardEdges(self):
+        pm.polySoftEdge(angle=180)
 
     def getSelectedMesh(self):
         selectedMesh = []
@@ -268,12 +241,13 @@ class EdgeOptimizer(object):
         return selectedMesh
 
 
-class UI(EdgeOptimizer):
+class UI(MeshOptimizer):
 
     def __init__(self):
-        windowName = "EdgeOptimizer"
+        super().__init__()
+        windowName = "MeshOptimizer"
     
-        if pm.window(windowName, exists=True):
+        if pm.window(windowName, exists=True, query=True):
             print("Deleting window:", pm.window(windowName, query=True, title=True))
             pm.deleteUI(windowName)
         
@@ -289,59 +263,59 @@ class UI(EdgeOptimizer):
         pm.frameLayout(label="", marginHeight=5, marginWidth=5)
 
         pm.columnLayout(rowSpacing=10, adjustableColumn=True)
-        self.angleToleranceSlider = pm.floatSliderGrp(l="Angle Tolerance", field=True, value=0.001, minValue=0, maxValue=0.1, step=0.001, 
+        self.angleToleranceSlider = pm.floatSliderGrp(l="Angle Tolerance", field=True, value=self.angleTolerance, minValue=0, maxValue=0.1, step=0.001,
                                                     adjustableColumn=3, columnWidth=([2,0], [3,150]), columnAttach3=["right","left","right"], 
                                                     columnOffset3=[40,-40,0], annotation="You'll probably never need to adjust this.")
         
         pm.rowLayout(numberOfColumns=2)
-        self.searchTypeDropdown = pm.optionMenuGrp(label='Search Type', columnAlign=[1,"left"], columnAttach=[2,"left", -80] )
-        pm.menuItem(label='Entire Mesh')
-        pm.menuItem(label='Boolean History')
-        pm.menuItem(label='By Material')
-        pm.setParent('..')
-        self.mergeVertsCheckbox = pm.checkBoxGrp(label="Merge verts afterward", columnAlign=[1,"left"], columnAttach=[2,"left", -10], changeCommand=lambda *args:self.toggleVertMergeSlider())
-        self.mergeDistSlider = pm.floatSliderGrp(l="Vert Merge Dist", field=True, value=0.01, step=0.001, 
+
+        self.mergeVertsCheckbox = pm.checkBoxGrp(label="Merge verts afterward", columnAlign=[1,"left"], columnAttach=[2,"left", -10], changeCommand=lambda *args:self.toggleVertMergeSlider(), value1=self.mergeVerts)
+        self.mergeDistSlider = pm.floatSliderGrp(l="Vert Merge Dist", field=True, value=self.mergeDistance, step=0.01, 
                                         columnWidth=([2,0], [3,150]), adjustableColumn=3, columnAttach3=["right","left","right"], 
                                         columnOffset3=[40,-40,0], annotation="Info text", visible=False)
         pm.setParent('..')
 
-        pm.button(l="Clean it!", h=40, c=lambda *args:self.buttonPress(), bgc=[0.6,0.8,0.6])
+        pm.button(l="Find Edges", h=40, c=lambda *args:self.findEdgesButton(), bgc=[0.6,0.8,0.6])
+        pm.button(l="Delete Edges", h=40, c=lambda *args:self.deleteEdgesButton(), bgc=[0.6,0.8,0.6])
 
         pm.separator()
 
         pm.columnLayout(rowSpacing=10, adjustableColumn=True)
         pm.button(l="Find Smoothable Hard Edges", h=40, c=lambda *args:self.findBrokenTangents(), bgc=[0.6,0.7,0.6])
-        self.smoothEdgesAfter = pm.checkBoxGrp(label="Fix After Finding", columnAlign=[1,"left"], columnAttach=[2,"left", -10])
+        pm.button(l="Smooth the Edges", h=40, c=lambda *args:self.smoothHardEdges(), bgc=[0.6,0.7,0.6])
         pm.setParent('..')
         
         pm.showWindow(windowName)
         
 		
-    def buttonPress(self):
-        angleTolerance = pm.floatSliderGrp(self.angleToleranceSlider, query=True, value=True)
-        mergeDistance = pm.floatSliderGrp(self.mergeDistSlider, query=True, value=True)
-        searchType = pm.optionMenuGrp(self.searchTypeDropdown, query=True, value=True)
-        mergeVerts= pm.checkBoxGrp(self.mergeVertsCheckbox, query=True, value1=True)
-        
-        self.deleteBooleanEdges(searchType, angleTolerance, mergeVerts, mergeDistance)
+    def findEdgesButton(self):
+        if(len(pm.selected()) == 0):
+            pm.error("No objects selected.")
 
+        self.angleTolerance = pm.floatSliderGrp(self.angleToleranceSlider, query=True, value=True)
+        self.mergeDistance = pm.floatSliderGrp(self.mergeDistSlider, query=True, value=True)
+        self.mergeVerts = pm.checkBoxGrp(self.mergeVertsCheckbox, query=True, value1=True)
+        
+        self.findBadEdges()
+
+    def deleteEdgesButton(self):
+        self.deleteEdges()
+
+    def toggleVertMergeSlider(self):
+        visibleState = pm.floatSliderGrp(self.mergeDistSlider, query=True, visible=True)
+        pm.floatSliderGrp(self.mergeDistSlider, edit=True, visible=not visibleState)
 
     def helpWindow(self):
         windowName = "HelpWindow"
-        if pm.window(windowName, exists=True):
+        if pm.window(windowName, exists=True, query=True):
             pm.deleteUI(windowName)
         
         pm.window(windowName, t=windowName)
         pm.columnLayout(rowSpacing=10, adjustableColumn=True)
         pm.text(l="\r\nThis tool is meant to remove superfluous edges from a model which\
         \r\ndo not add detail and can safely be optimized away without affecting the visual look.\
-        \r\nit can also detect edges that can be smoothed without affecting the look of the model to reduce vertex counts")
+        \r\nit can also detect edges which can be safely smoothed to reduce vertex counts")
         pm.showWindow(windowName)
-		
-
-    def toggleVertMergeSlider(self):
-        visibleState = pm.floatSliderGrp(self.mergeDistSlider, query=True, visible=True)
-        pm.floatSliderGrp(self.mergeDistSlider, edit=True, visible=not visibleState)
 
     def dropDownMenu(self):
         pass
@@ -351,4 +325,4 @@ class UI(EdgeOptimizer):
         pass
         
 		
-edgeOptimizerWindow = UI()
+meshOptimizerWindow = UI()
