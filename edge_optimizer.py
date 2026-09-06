@@ -2,11 +2,10 @@
 
 import maya.api.OpenMaya as om2
 import pymel.core as pm
-
+from collections.abc import Iterable 
 
 class MeshOptimizer(object):
     def __init__(self):
-        self.dagPath = None
         self.deletableEdges = []
         self.smoothableHardEdges = []
         self.mergeVerts = False
@@ -28,6 +27,10 @@ class MeshOptimizer(object):
         Helper to convert API component indicies to strings that Python and MEL understand
         """
         strings = []
+
+        if not isinstance(items, Iterable):
+            items = [items]
+
         for item in items:
             strings.append("%s.%s[%d]" % (dagPath, componentType, item))
         return strings
@@ -39,7 +42,7 @@ class MeshOptimizer(object):
         vertIndicies = []
         vertPositions = []
         
-        for vert in range(mesh.numVertices - 1):
+        for vert in range(mesh.numVertices):
             vertIndicies.append(vert)
             vertPos = mesh.getPoint(vert)
             vertPositions.append((vertPos.x, vertPos.y, vertPos.z))
@@ -109,13 +112,12 @@ class MeshOptimizer(object):
                             connectedEdges = self.removeFromArray(connectedEdges, edge2)
                             
                             #connectedEdges = self.checkOutlyingEdges(dagPath, connectedVerts, connectedEdges)
-                            print(connectedEdges)
                             connectedEdges = self.checkUVBorders(self.indexToString(dagPath, connectedEdges, "e"))
                             return connectedEdges
                         
             vertIter.next()
     
-	
+	# ideally merges verts around the boolean cuts but what if we don't have boolean history?
     def mergeNearbyVerts(self, dagPath, boolVertPositions):
         print("Merging verts")
         verts = om2.MFnMesh(dagPath).getPoints()
@@ -134,15 +136,20 @@ class MeshOptimizer(object):
         selIter = om2.MItSelectionList(selection)
         while not selIter.isDone():
             dagPath = selIter.getDagPath()
-            # Get edges and verts to work on
-            obj = pm.ls(dagPath.fullPathName())[0]
-            verts = range(0, obj.numVertices()-1)
-            for vert in verts:
-                edges = self.getParallelEdges(dagPath, vert)
-                if edges:
-                    for edge in edges:
-                        if edge not in self.deletableEdges:
-                            self.deletableEdges.append(edge)
+            mesh = om2.MFnMesh(dagPath)
+            edgeIter = om2.MItMeshEdge(dagPath)
+
+            while not edgeIter.isDone():
+                if not edgeIter.onBoundary():
+                    faces = edgeIter.getConnectedFaces()
+                    if len(faces) == 2:
+                        fn0 = mesh.getPolygonNormal(faces[0], om2.MSpace.kWorld)
+                        fn1 = mesh.getPolygonNormal(faces[1], om2.MSpace.kWorld)
+                        if fn0.angle(fn1) <= self.angleTolerance:
+                            edgeStr = self.indexToString(dagPath.fullPathName(), edgeIter.index(), 'e')
+                            if edgeStr not in self.deletableEdges:
+                                self.deletableEdges.append(edgeStr)
+                edgeIter.next()
             
             selIter.next()
 
@@ -232,6 +239,7 @@ class MeshOptimizer(object):
 
     def smoothHardEdges(self):
         pm.polySoftEdge(angle=180)
+        pm.select(clear=True)
 
     def getSelectedMesh(self):
         selectedMesh = []
