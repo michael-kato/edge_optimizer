@@ -140,7 +140,7 @@ class MeshOptimizer(object):
     def deleteEdges(self):
         print("Deleting:", self.deletableEdges)
         if self.deletableEdges:
-            pm.polyDelEdge(self.deletableEdges, cv=True)  # polyDelEdge -cv true -ch 1 knife_cuts.e[848:895] knife_cuts.e[940:983] knife_cuts.e[1032:1079] knife_cuts.e[1118:1159];
+            pm.polyDelEdge(self.deletableEdges, cv=True)  
 
         # TODO: implement this properly
         if self.mergeVerts:
@@ -189,8 +189,16 @@ class MeshOptimizer(object):
         om2.MGlobal.displayInfo("Found {} hard edges with matching normals.".format(len(self.smoothableHardEdges)))
 
     def smoothHardEdges(self):
-        pm.polySoftEdge(angle=180)
+        pm.undoInfo(openChunk=True)
+
+        sel = pm.selected()
+        if sel:
+            for s in sel:
+                pm.select(s, replace=True)
+                pm.polySoftEdge(angle=180)
+                
         pm.select(clear=True)
+        pm.undoInfo(closeChunk=True)
 
     def triangulate(self):
         print("Triangulating")
